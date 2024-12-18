@@ -1,0 +1,128 @@
+name: Node.js CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - release  # Trigger on push to the release branch
+  pull_request:
+    branches:
+      - release  # Trigger on pull requests targeting the release branch
+
+jobs:
+  # Job to set up the environment, run tests, and build the Docker image
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out the repository
+      uses: actions/checkout@v2
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: '16'
+
+    - name: Install dependencies
+      run: npm install
+
+    - name: Run tests
+      run: npm test
+
+  # Job to build and push the Docker image to Docker Hub
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out the repository
+      uses: actions/checkout@v2
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Build and push Docker image to Docker Hub
+      uses: docker/build-push-action@v2
+      with:
+        push: true
+        tags: ${{ secrets.DOCKER_USERNAME }}/my-app:${{ github.run_number }}
+
+  # Job to deploy to Minikube
+  kubernetes-deploy:
+    needs: deploy
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out the repository
+      uses: actions/checkout@v2
+
+    # Install Minikube
+    - name: Install Minikube
+      run: |
+        curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+        sudo mv minikube-linux-amd64 /usr/local/bin/minikube
+        sudo chmod +x /usr/local/bin/minikube
+
+    # Start Minikube cluster
+    - name: Start Minikube
+      run: |
+        minikube start --driver=docker
+
+    # Set up kubectl for Minikube
+    - name: Install kubectl
+      run: |
+        curl -LO https://storage.googleapis.com/kubernetes-release/release/v1.23.0/bin/linux/amd64/kubectl
+        chmod +x ./kubectl
+        sudo mv ./kubectl /usr/local/bin/kubectl
+
+    # Set up kubeconfig to point to Minikube's context
+    - name: Set up kubeconfig for Minikube
+      run: |
+        kubectl config use-context minikube
+
+    # Apply the deployment to create the deployment
+    - name: Apply Kubernetes Deployment
+      run: |
+        kubectl apply -f kubernetes/deployment.yml
+
+    # Set the image tag dynamically using GitHub SHA
+    - name: Set image in Kubernetes deployment
+      run: |
+        IMAGE_TAG=${{ github.sha }}
+        kubectl set image deployment/my-app my-app=${{ secrets.DOCKER_USERNAME }}/my-app:$IMAGE_TAG
+
+  # Job to send email notifications
+    # Job to send email notifications
+  notify:
+    needs: kubernetes-deploy
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Install msmtp
+      run: |
+        sudo apt-get update
+        sudo apt-get install msmtp msmtp-mta
+
+    - name: Set up msmtp configuration
+      run: |
+        echo "account default
+        host smtp.gmail.com
+        port 587
+        from ${{ secrets.GMAIL_USERNAME }}
+        auth on
+        user ${{ secrets.GMAIL_USERNAME }}
+        password ${{ secrets.GMAIL_PASSWORD }}
+        tls on" > ~/.msmtprc
+        chmod 600 ~/.msmtprc
+
+    - name: Send success notification
+      if: success()
+      run: |
+        echo -e "Subject: CI/CD Pipeline Success\n\nDeployment Successful!" | msmtp ${{ secrets.GMAIL_USERNAME }}
+
+    - name: Send failure notification
+      if: failure()
+      run: |
+        echo -e "Subject: CI/CD Pipeline Failure\n\nDeployment Failed!" | msmtp ${{ secrets.GMAIL_USERNAME }}
